@@ -84,7 +84,7 @@ def extract_text_pymupdf_concurrent(pdf_buffer, batch_size):
             for start_page in range(0, total_pages, batch_size):
                 end_page = min(start_page + batch_size, total_pages)
                 futures.append(executor.submit(process_page_batch, start_page, end_page))
-                st.write(f"Scheduled pages {start_page + 1} to {end_page} for processing")
+                # st.write(f"Scheduled pages {start_page + 1} to {end_page} for processing")
 
             # Collect the results as they complete
             results = [future.result() for future in concurrent.futures.as_completed(futures)]
