@@ -113,16 +113,16 @@ if st.button("Extract"):
 
             if library == "PyMuPDF":
                 result = extract_text_pymupdf_optimized(pdf_buffer)
-
                 st.write("PyMuPDF Extracted Text:")
+                st.write(result)
 
             elif library == "OCR Combo":
                 result = extract_text_ocr_combo(pdf_buffer)
-
                 st.write("OCR Combo Extracted Text:")
+                st.write(result)
 
         end_time = time.time()
         st.text(f"Total processing time: {end_time - start_time:.2f} seconds")
-        st.write(result)
+
     else:
         st.error("Please upload files first")
