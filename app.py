@@ -1,7 +1,5 @@
 import gc
 import concurrent.futures
-import os
-import tempfile
 import streamlit as st
 import fitz
 from io import BytesIO
@@ -115,17 +113,16 @@ if st.button("Extract"):
 
             if library == "PyMuPDF":
                 result = extract_text_pymupdf_optimized(pdf_buffer)
-                end_time = time.time()
-                time_difference = end_time - start_time
-                st.write(f"Time taken: {time_difference}")
+
                 st.write("PyMuPDF Extracted Text:")
-                st.write(result)
+
             elif library == "OCR Combo":
                 result = extract_text_ocr_combo(pdf_buffer)
-                end_time = time.time()
-                time_difference = end_time - start_time
-                st.write(f"Time taken: {time_difference}")
+
                 st.write("OCR Combo Extracted Text:")
-                st.write(result)
+
+        end_time = time.time()
+        st.text(f"Total processing time: {end_time - start_time:.2f} seconds")
+        st.write(result)
     else:
         st.error("Please upload files first")
