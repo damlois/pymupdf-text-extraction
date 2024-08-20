@@ -2,16 +2,20 @@ import gc
 import concurrent.futures
 import os
 import tempfile
-import time
 import streamlit as st
 import fitz
+from io import BytesIO
+import time
+from PIL import Image
+import pytesseract
+import pypdfium2 as pdfium
 
 st.title("Text Extraction App")
 
 # Allow the user to select a library for extraction
 library = st.selectbox(
     "Select Library",
-    ["PyMuPDF"],
+    ["PyMuPDF", "OCR Combo"],
 )
 
 # Allow the user to upload files
@@ -22,72 +26,106 @@ if uploaded_files:
     st.write(f"Number of uploaded files: {num_files}")
 
 
-# Optimized PyMuPDF extraction function with concurrency and garbage collection
-def extract_text_pymupdf_concurrent(file_path, batch_size=50):
+def convert_pdf_to_images(pdf_buffer, scale=300 / 72):
+    pdf_file = pdfium.PdfDocument(pdf_buffer)
+    page_indices = [i for i in range(len(pdf_file))]
+
+    renderer = pdf_file.render(
+        pdfium.PdfBitmap.to_pil,
+        page_indices=page_indices,
+        scale=scale,
+    )
+
+    list_final_images = []
+
+    for i, image in zip(page_indices, renderer):
+        image_byte_array = BytesIO()
+        image.save(image_byte_array, format="jpeg", optimize=True)
+        image_byte_array = image_byte_array.getvalue()
+        list_final_images.append({i: image_byte_array})
+
+    return list_final_images
+
+
+def extract_text_ocr_combo(pdf_buffer):
+    # Convert PDF to images
+    images = convert_pdf_to_images(pdf_buffer)
+
+    extracted_text = []
+
+    for image_dict in images:
+        for page_number, image_bytes in image_dict.items():
+            # Convert byte array back to an image
+            image = Image.open(BytesIO(image_bytes))
+
+            # Perform OCR using Tesseract
+            text = pytesseract.image_to_string(image)
+            extracted_text.append(f"Page {page_number + 1}:\n{text}")
+
+    # Return the extracted text as a single string
+    return "\n".join(extracted_text)
+
+
+def extract_text_pymupdf_concurrent(pdf_buffer, batch_size):
     text = ""
     try:
-        with fitz.open(file_path) as doc:
-            total_pages = len(doc)
+        doc = fitz.open(stream=pdf_buffer.read(), filetype="pdf")
+        total_pages = len(doc)
 
-            # Helper function to process a batch of pages concurrently
-            def process_page_batch(start_page, end_page):
-                batch_text = ""
-                for page_num in range(start_page, end_page):
-                    page = doc.load_page(page_num)
-                    batch_text += page.get_text("text")
-                return batch_text
+        # Helper function to process a batch of pages concurrently
+        def process_page_batch(start_page, end_page):
+            batch_text = ""
+            for page_num in range(start_page, end_page):
+                page = doc.load_page(page_num)
+                batch_text += page.get_text("text")
+            return batch_text
 
-            # Create a thread pool executor to handle the concurrent tasks
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = []
-                for start_page in range(0, total_pages, batch_size):
-                    end_page = min(start_page + batch_size, total_pages)
-                    futures.append(executor.submit(process_page_batch, start_page, end_page))
-                    st.write(f"Scheduled pages {start_page + 1} to {end_page} for processing")
+        # Create a thread pool executor to handle the concurrent tasks
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            for start_page in range(0, total_pages, batch_size):
+                end_page = min(start_page + batch_size, total_pages)
+                futures.append(executor.submit(process_page_batch, start_page, end_page))
+                st.write(f"Scheduled pages {start_page + 1} to {end_page} for processing")
 
-                # Collect the results as they complete
-                results = [future.result() for future in concurrent.futures.as_completed(futures)]
-                text = "".join(results)
+            # Collect the results as they complete
+            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            text = "".join(results)
 
         # Perform garbage collection after processing all batches
         gc.collect()
 
     except Exception as e:
-        st.error(f"Error processing file {file_path}: {e}")
+        st.error(f"Error processing file: {e}")
         return None
 
     return text
 
-def extract_text_pymupdf_optimized(file_path, batch_size=30):
-    return extract_text_pymupdf_concurrent(file_path, batch_size)
 
-# def extract_text_pymupdf_optimized(file_path):
-#     with fitz.open(file_path) as doc:
-#         text = ""
-#         for page in doc:
-#             text += page.get_text("text")
-#
-#     gc.collect()
-#     return text
-#
+def extract_text_pymupdf_optimized(pdf_buffer, batch_size=50):
+    return extract_text_pymupdf_concurrent(pdf_buffer, batch_size)
 
-start_time = time.time()
+
 # Button to trigger extraction
 if st.button("Extract"):
     start_time = time.time()
     if uploaded_files:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            for file in uploaded_files:
-                file_path = os.path.join(tmp_dir, file.name)
-                with open(file_path, "wb") as f:
-                    f.write(file.getbuffer())
-                if library == "PyMuPDF":
-                    result = extract_text_pymupdf_optimized(file_path)
-                    st.write("PyMuPDF Extracted Text:")
-                    st.write(result)
+        for file in uploaded_files:
+            pdf_buffer = BytesIO(file.getbuffer())  # Load the file into a BytesIO buffer
+
+            if library == "PyMuPDF":
+                result = extract_text_pymupdf_optimized(pdf_buffer)
+                end_time = time.time()
+                time_difference = end_time - start_time
+                st.write(f"Time taken: {time_difference}")
+                st.write("PyMuPDF Extracted Text:")
+                st.write(result)
+            elif library == "OCR Combo":
+                result = extract_text_ocr_combo(pdf_buffer)
+                end_time = time.time()
+                time_difference = end_time - start_time
+                st.write(f"Time taken: {time_difference}")
+                st.write("OCR Combo Extracted Text:")
+                st.write(result)
     else:
         st.error("Please upload files first")
-
-end_time = time.time()
-time_difference = end_time - start_time
-st.write(f"Time taken: {time_difference}")
