@@ -1,5 +1,6 @@
 import gc
-import concurrent.futures
+import warnings
+from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 import fitz
 from io import BytesIO
@@ -8,6 +9,7 @@ from PIL import Image
 import pytesseract
 import pypdfium2 as pdfium
 
+warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 st.title("Text Extraction App")
 
 # Allow the user to select a library for extraction
@@ -24,8 +26,8 @@ if uploaded_files:
     st.write(f"Number of uploaded files: {num_files}")
 
 
-def convert_pdf_to_images(pdf_buffer, scale=300 / 72):
-    pdf_file = pdfium.PdfDocument(pdf_buffer)
+def convert_pdf_to_images(doc_buffer, scale=300 / 72):
+    pdf_file = pdfium.PdfDocument(doc_buffer)
     page_indices = [i for i in range(len(pdf_file))]
 
     renderer = pdf_file.render(
@@ -45,66 +47,82 @@ def convert_pdf_to_images(pdf_buffer, scale=300 / 72):
     return list_final_images
 
 
-def extract_text_ocr_combo(pdf_buffer):
+def process_page_batch_tesseract(image_batch):
+    batch_text = []
+    for image_dict in image_batch:
+        for page_number, image_bytes in image_dict.items():
+            image = Image.open(BytesIO(image_bytes))
+            text = pytesseract.image_to_string(image)
+            batch_text.append(text)
+
+            image.close()
+
+        gc.collect()
+
+    return batch_text
+
+
+def extract_text_ocr_combo(doc_buffer, batch_size=50):
     # Convert PDF to images
-    images = convert_pdf_to_images(pdf_buffer)
+    images = convert_pdf_to_images(doc_buffer)
+    batches = [images[i:i + batch_size] for i in range(0, len(images), batch_size)]
 
     extracted_text = []
 
-    for image_dict in images:
-        for page_number, image_bytes in image_dict.items():
-            # Convert byte array back to an image
-            image = Image.open(BytesIO(image_bytes))
+    with ThreadPoolExecutor() as executor:
+        future_to_batch = {
+            executor.submit(process_page_batch_tesseract, batch): batch
+            for batch in batches
+        }
 
-            # Perform OCR using Tesseract
-            text = pytesseract.image_to_string(image)
-            extracted_text.append(f"Page {page_number + 1}:\n{text}")
+        # Collect the results as they complete
+        for future in future_to_batch:
+            try:
+                extracted_text.extend(future.result())
+            except Exception as e:
+                extracted_text.append(f"Error processing batch: {str(e)}")
 
-    # Return the extracted text as a single string
+    gc.collect()
     return "\n".join(extracted_text)
 
 
-def extract_text_pymupdf_concurrent(pdf_buffer, batch_size):
-    text = ""
-    try:
-        doc = fitz.open(stream=pdf_buffer.read(), filetype="pdf")
-        total_pages = len(doc)
+def process_page_batch_pymupdf(document, page_numbers):
+    extracted_text = ""
+    for page_number in page_numbers:
+        page = document.load_page(page_number)
+        extracted_text += page.get_text("text")
+        del page
 
-        # Helper function to process a batch of pages concurrently
-        def process_page_batch(start_page, end_page):
-            batch_text = ""
-            for page_num in range(start_page, end_page):
-                page = doc.load_page(page_num)
-                batch_text += page.get_text("text")
-            return batch_text
-
-        # Create a thread pool executor to handle the concurrent tasks
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            for start_page in range(0, total_pages, batch_size):
-                end_page = min(start_page + batch_size, total_pages)
-                futures.append(executor.submit(process_page_batch, start_page, end_page))
-                # st.write(f"Scheduled pages {start_page + 1} to {end_page} for processing")
-
-            # Collect the results as they complete
-            results = [future.result() for future in concurrent.futures.as_completed(futures)]
-            text = "".join(results)
-
-        # Perform garbage collection after processing all batches
-        gc.collect()
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-        return None
-
-    return text
+    gc.collect()
+    return extracted_text
 
 
-def extract_text_pymupdf_optimized(pdf_buffer, batch_size=50):
-    return extract_text_pymupdf_concurrent(pdf_buffer, batch_size)
+def extract_text_pymupdf(doc_buffer, batch_size=50):
+    document = fitz.open(stream=doc_buffer, filetype="pdf")
+    total_pages = document.page_count
+
+    batches = [range(i, min(i + batch_size, total_pages)) for i in range(0, total_pages, batch_size)]
+
+    extracted_text = []
+
+    with ThreadPoolExecutor() as executor:
+        future_to_batch = {
+            executor.submit(process_page_batch_pymupdf, document, batch): batch
+            for batch in batches
+        }
+
+        for future in future_to_batch:
+            try:
+                extracted_text.append(future.result())
+            except Exception as e:
+                extracted_text.append(f"Error processing batch: {str(e)}")
+
+    document.close()
+    gc.collect()
+
+    return "\n".join(extracted_text)
 
 
-# Button to trigger extraction
 if st.button("Extract"):
     start_time = time.time()
     if uploaded_files:
@@ -112,7 +130,7 @@ if st.button("Extract"):
             pdf_buffer = BytesIO(file.getbuffer())  # Load the file into a BytesIO buffer
 
             if library == "PyMuPDF":
-                result = extract_text_pymupdf_optimized(pdf_buffer)
+                result = extract_text_pymupdf(pdf_buffer)
                 st.write("PyMuPDF Extracted Text:")
                 st.write(result)
 
